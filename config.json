@@ -1,0 +1,41 @@
+{
+  "form_id": "1FAIpQLSfD_YOUR_MOCK_FORM_ID",
+  "mappings": {
+    "Họ và Tên": {
+      "entry_id": "entry.1000001",
+      "type": "text"
+    },
+    "Email": {
+      "entry_id": "entry.1000002",
+      "type": "text"
+    },
+    "Số điện thoại": {
+      "entry_id": "entry.1000003",
+      "type": "text"
+    },
+    "Giới tính": {
+      "entry_id": "entry.1000004",
+      "type": "radio"
+    },
+    "Sở thích": {
+      "entry_id": "entry.1000005",
+      "type": "checkbox",
+      "separator": ","
+    },
+    "Thành phố": {
+      "entry_id": "entry.1000006",
+      "type": "dropdown"
+    },
+    "Ngày sinh": {
+      "entry_id": "entry.1000007",
+      "type": "date"
+    }
+  },
+  "settings": {
+    "min_delay": 1.0,
+    "max_delay": 3.0,
+    "max_retries": 3,
+    "retry_backoff": 2.0,
+    "timeout": 10
+  }
+}

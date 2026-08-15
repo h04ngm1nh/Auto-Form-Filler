@@ -1,0 +1,62 @@
+# ==========================================
+# GITIGNORE CHO DỰ ÁN PYTHON AUTOMATION
+# ==========================================
+
+# 1. Bộ nhớ đệm của Python (Byte-compiled / optimize / DLLs)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# 2. Môi trường ảo (Virtual Environments)
+venv/
+.venv/
+env/
+ENV/
+bin/
+lib/
+include/
+pip-selfcheck.json
+
+# 3. Cấu hình các IDE / Editor phổ biến
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.project
+.pydevproject
+.settings/
+
+# 4. File tạm của Hệ điều hành (OS temporary files)
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 5. File log kết quả chạy thử nghiệm & File môi trường
+result_log.xlsx
+*.log
+.env
+.env.local
+.env.*.local
+
+# 6. Các tệp tin cấu hình Node/Vite cũ (được giữ lại để tham chiếu nếu cần, hoặc ignore)
+node_modules/
+dist/
+dist-ssr/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
