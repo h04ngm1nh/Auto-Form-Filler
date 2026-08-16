@@ -1,54 +1,31 @@
 {
-  "form_id": "1FAIpQLSfD_YOUR_MOCK_FORM_ID",
-  "mappings": {
-    "Họ và Tên": {
-      "entry_id": "entry.1000001",
-      "type": "text",
-      "required": true
+  "form_url": "https://docs.google.com/forms/d/e/1FAIpQLSe2USbGhItHRiU5R4JQ4oz32wJ1VMFNMjcW5Xa9NJVvDx6g0g/formResponse",
+  "session_rotation_limit": 15,
+  "success_keywords": [
+    "Your response has been recorded",
+    "Câu trả lời của bạn đã được ghi lại",
+    "Thanks for submitting your contact info!"
+  ],
+  "field_mappings": {
+    "entry.2005620554": {
+      "column_name": "Ho_va_ten",
+      "required": true,
+      "type": "string"
     },
-    "Email": {
-      "entry_id": "entry.1000002",
-      "type": "text",
-      "required": true
+    "entry.1166974658": {
+      "column_name": "So_dien_thoai",
+      "required": true,
+      "type": "string"
     },
-    "Số điện thoại": {
-      "entry_id": "entry.1000003",
-      "type": "text",
-      "required": false
+    "entry.840782606": {
+      "column_name": "Email",
+      "required": true,
+      "type": "string"
     },
-    "Giới tính": {
-      "entry_id": "entry.1000004",
-      "type": "radio",
-      "required": true
-    },
-    "Sở thích": {
-      "entry_id": "entry.1000005",
-      "type": "checkbox",
-      "separator": ";",
-      "required": false
-    },
-    "Thành phố": {
-      "entry_id": "entry.1000006",
-      "type": "dropdown",
-      "required": true
-    },
-    "Ngày sinh": {
-      "entry_id": "entry.1000007",
-      "type": "date",
-      "required": true
+    "entry.284884374": {
+      "column_name": "Xac_nhan",
+      "required": true,
+      "type": "string"
     }
-  },
-  "settings": {
-    "min_delay": 2.0,
-    "max_delay": 5.0,
-    "max_retries": 3,
-    "retry_backoff": 2.0,
-    "timeout": 10,
-    "session_rotation_limit": 15,
-    "success_keywords": [
-      "Your response has been recorded",
-      "Câu trả lời của bạn đã được ghi lại",
-      "Thanks for submitting your contact info!"
-    ]
   }
 }

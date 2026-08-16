@@ -109,12 +109,28 @@ class ConfigLoader:
                 config["form_id"] = form_url.split('/')[-2] if '/' in form_url else form_url
                 
             config["mappings"] = {}
-            for entry_id, col_name in config["field_mappings"].items():
-                config["mappings"][col_name] = {
-                    "entry_id": entry_id,
-                    "type": "text",
-                    "required": False
-                }
+            for entry_id, val in config["field_mappings"].items():
+                if isinstance(val, dict):
+                    # Dạng 2: mapping qua object chứa thông tin chi tiết
+                    col_name = val.get("column_name", f"Cột_{entry_id}")
+                    col_type = val.get("type", "text")
+                    if col_type.lower() == "string":
+                        col_type = "text"
+                    is_req = val.get("required", False)
+                    
+                    config["mappings"][col_name] = {
+                        "entry_id": entry_id,
+                        "type": col_type,
+                        "required": is_req
+                    }
+                else:
+                    # Dạng 1: mapping qua chuỗi tên cột trực tiếp
+                    col_name = str(val)
+                    config["mappings"][col_name] = {
+                        "entry_id": entry_id,
+                        "type": "text",
+                        "required": False
+                    }
             if "success_keywords" in config:
                 if "settings" not in config:
                     config["settings"] = {}
@@ -576,9 +592,26 @@ class ExecutionController:
             df["Submission_Status"] = [status_map.get(i, "Not Processed") for i in range(len(df))]
             df["Submission_Error_Detail"] = [msg_map.get(i, "") for i in range(len(df))]
 
-            # Ghi file Excel báo cáo
-            df.to_excel(self.output_path, index=False, engine="openpyxl")
-            logger.info(f"Đã xuất báo cáo kết quả gửi dữ liệu thành công: {self.output_path}")
+            # Ghi file Excel báo cáo an toàn (tránh lỗi khóa file do người dùng đang mở)
+            write_success = False
+            current_output_path = self.output_path
+            
+            while not write_success:
+                try:
+                    df.to_excel(current_output_path, index=False, engine="openpyxl")
+                    write_success = True
+                    logger.info(f"Đã xuất báo cáo kết quả gửi dữ liệu thành công: {current_output_path}")
+                except PermissionError:
+                    print(f"\n[!] CẢNH BÁO: Không thể ghi file báo cáo vào đường dẫn: {current_output_path}")
+                    print("    Có vẻ như file Excel này đang được mở bởi một chương trình khác (ví dụ Microsoft Excel).")
+                    choice = input("    Vui lòng đóng file Excel lại và nhấn Enter để thử lại, hoặc nhập 'save' để lưu thành file phụ: ").strip().lower()
+                    if choice == "save":
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        base, ext = os.path.splitext(self.output_path)
+                        current_output_path = f"{base}_copy_{timestamp}{ext}"
+                except Exception as e:
+                    logger.error(f"Lỗi không xác định khi ghi báo cáo Excel: {e}")
+                    break
             
             # Thống kê kết quả
             success_count = list(status_map.values()).count("Success")
@@ -603,16 +636,24 @@ class ExecutionController:
             logger.error(f"Lỗi nạp cấu hình: {e}")
             sys.exit(1)
 
-        # 2. Đọc file dữ liệu Excel/CSV
-        try:
-            if self.data_path.endswith(".csv"):
-                df = pd.read_csv(self.data_path)
-            else:
-                df = pd.read_excel(self.data_path)
-            logger.info(f"Đọc dữ liệu thành công: {self.data_path}. Tổng số dòng: {len(df)}")
-        except Exception as e:
-            logger.error(f"Lỗi đọc file dữ liệu đầu vào: {e}")
-            sys.exit(1)
+        # 2. Đọc file dữ liệu Excel/CSV an toàn (tránh lỗi khóa file do người dùng đang mở)
+        df = None
+        read_success = False
+        while not read_success:
+            try:
+                if self.data_path.endswith(".csv"):
+                    df = pd.read_csv(self.data_path)
+                else:
+                    df = pd.read_excel(self.data_path)
+                read_success = True
+                logger.info(f"Đọc dữ liệu thành công: {self.data_path}. Tổng số dòng: {len(df)}")
+            except PermissionError:
+                print(f"\n[!] CẢNH BÁO: Không thể đọc file dữ liệu đầu vào: {self.data_path}")
+                print("    File Excel này đang bị khóa hoặc được mở bởi một chương trình khác.")
+                input("    Vui lòng đóng file Excel lại và nhấn Enter để thử lại...")
+            except Exception as e:
+                logger.error(f"Lỗi đọc file dữ liệu đầu vào: {e}")
+                sys.exit(1)
 
         # Kiểm tra file checkpoint và cấu hình trạng thái Resume
         self._load_checkpoint()
