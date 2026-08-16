@@ -3,39 +3,47 @@
   "mappings": {
     "Họ và Tên": {
       "entry_id": "entry.1000001",
-      "type": "text"
+      "type": "text",
+      "required": true
     },
     "Email": {
       "entry_id": "entry.1000002",
-      "type": "text"
+      "type": "text",
+      "required": true
     },
     "Số điện thoại": {
       "entry_id": "entry.1000003",
-      "type": "text"
+      "type": "text",
+      "required": false
     },
     "Giới tính": {
       "entry_id": "entry.1000004",
-      "type": "radio"
+      "type": "radio",
+      "required": true
     },
     "Sở thích": {
       "entry_id": "entry.1000005",
       "type": "checkbox",
-      "separator": ","
+      "separator": ";",
+      "required": false
     },
     "Thành phố": {
       "entry_id": "entry.1000006",
-      "type": "dropdown"
+      "type": "dropdown",
+      "required": true
     },
     "Ngày sinh": {
       "entry_id": "entry.1000007",
-      "type": "date"
+      "type": "date",
+      "required": true
     }
   },
   "settings": {
-    "min_delay": 1.0,
-    "max_delay": 3.0,
+    "min_delay": 2.0,
+    "max_delay": 5.0,
     "max_retries": 3,
     "retry_backoff": 2.0,
-    "timeout": 10
+    "timeout": 10,
+    "session_rotation_limit": 15
   }
 }

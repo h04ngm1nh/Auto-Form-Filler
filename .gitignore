@@ -46,6 +46,8 @@ Desktop.ini
 
 # 5. File log kết quả chạy thử nghiệm & File môi trường
 result_log.xlsx
+checkpoint_log.csv
+logs/
 *.log
 .env
 .env.local
