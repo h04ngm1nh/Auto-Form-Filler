@@ -114,7 +114,11 @@ class ConfigLoader:
             "max_retries": 3,
             "retry_backoff": 2.0,
             "timeout": 10,
-            "session_rotation_limit": 10
+            "session_rotation_limit": 10,
+            "success_keywords": [
+                "Your response has been recorded",
+                "Câu trả lời của bạn đã được ghi lại"
+            ]
         }
         for key, val in defaults.items():
             config["settings"].setdefault(key, val)
@@ -380,13 +384,17 @@ class FormSubmitter:
                 "freebirdFormviewerViewResponseError", "hasError", "error-message"
             ]
             
-            # Bộ từ khóa xác thực thành công rõ ràng
-            success_keywords = [
+            # Lấy danh sách từ khóa thành công từ cấu hình hoặc fallback mặc định
+            success_keywords = self.settings.get("success_keywords", [
                 "Your response has been recorded",
                 "Câu trả lời của bạn đã được ghi lại"
-            ]
+            ])
+            if not isinstance(success_keywords, list):
+                success_keywords = [str(success_keywords)]
 
-            is_recorded = any(k in html for k in success_keywords)
+            # So khớp không phân biệt hoa thường để tăng độ chính xác
+            html_lower = html.lower()
+            is_recorded = any(str(k).lower() in html_lower for k in success_keywords)
             has_error_flag = any(k in html for k in error_keywords)
 
             # Điều kiện thành công kép: HTTP 200 OK + Có từ khóa thành công + Không có từ khóa lỗi

@@ -44,6 +44,11 @@
     "max_retries": 3,
     "retry_backoff": 2.0,
     "timeout": 10,
-    "session_rotation_limit": 15
+    "session_rotation_limit": 15,
+    "success_keywords": [
+      "Your response has been recorded",
+      "Câu trả lời của bạn đã được ghi lại",
+      "Thanks for submitting your contact info!"
+    ]
   }
 }
