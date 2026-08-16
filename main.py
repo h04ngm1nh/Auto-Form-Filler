@@ -98,6 +98,28 @@ class ConfigLoader:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
 
+        # Chuyển đổi và chuẩn hóa cấu trúc config mới từ Pre-filled URL sang cấu trúc cũ nếu phát hiện
+        if "form_url" in config and "field_mappings" in config:
+            form_url = config["form_url"]
+            # Trích xuất form_id từ form_url
+            match = re.search(r'/d/e/([^/]+)/', form_url)
+            if match:
+                config["form_id"] = match.group(1)
+            else:
+                config["form_id"] = form_url.split('/')[-2] if '/' in form_url else form_url
+                
+            config["mappings"] = {}
+            for entry_id, col_name in config["field_mappings"].items():
+                config["mappings"][col_name] = {
+                    "entry_id": entry_id,
+                    "type": "text",
+                    "required": False
+                }
+            if "success_keywords" in config:
+                if "settings" not in config:
+                    config["settings"] = {}
+                config["settings"]["success_keywords"] = config["success_keywords"]
+
         # Xác thực các trường cấu hình cốt lõi
         if "form_id" not in config or not config["form_id"]:
             raise ValueError("Thiếu hoặc trống trường 'form_id' trong file cấu hình.")
@@ -651,6 +673,110 @@ class ExecutionController:
 
 
 # ==============================================================================
+# TEMPLATE BOOTSTRAPPER FROM PRE-FILLED URL
+# ==============================================================================
+
+def bootstrap_from_prefilled_url(url: str, output_excel: str, output_config: str) -> None:
+    """
+    Khởi tạo cấu hình config.json và file Excel mẫu từ Link Pre-filled của Google Form.
+    
+    Args:
+        url (str): Link Pre-filled Google Form.
+        output_excel (str): Đường dẫn file Excel đầu ra.
+        output_config (str): Đường dẫn file cấu hình đầu ra.
+    """
+    import urllib.parse
+    
+    logger.info("Đang bắt đầu phân tích Link Pre-filled...")
+    
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        path_parts = parsed_url.path.split('/')
+        form_id = None
+        
+        # Tìm form_id từ path (/d/e/[FORM_ID]/viewform)
+        try:
+            idx = path_parts.index('e')
+            form_id = path_parts[idx + 1]
+        except (ValueError, IndexError):
+            # Thử parse bằng regex nếu cấu trúc path khác
+            match = re.search(r'/d/e/([^/]+)/', parsed_url.path)
+            if match:
+                form_id = match.group(1)
+                
+        if not form_id:
+            raise ValueError("Không tìm thấy FORM ID hợp lệ trong đường dẫn URL.")
+            
+        form_response_url = f"https://docs.google.com/forms/d/e/{form_id}/formResponse"
+        
+        # Parse các tham số điền trước
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        entry_mappings = {}
+        excel_headers = []
+        dummy_row_1 = {}
+        dummy_row_2 = {}
+        
+        for key, values in query_params.items():
+            if key.startswith("entry."):
+                # Decode giá trị mẫu để làm tên cột Excel gợi ý
+                raw_val = values[0] if values else ""
+                col_name = raw_val.strip() if raw_val.strip() else f"Cột_{key}"
+                
+                # Tránh trùng lặp tên cột trong file Excel
+                original_col_name = col_name
+                counter = 1
+                while col_name in excel_headers:
+                    col_name = f"{original_col_name}_{counter}"
+                    counter += 1
+                    
+                entry_mappings[key] = col_name
+                excel_headers.append(col_name)
+                
+                # Tạo dữ liệu mẫu tương ứng cho cột
+                dummy_row_1[col_name] = raw_val
+                
+                # Gợi ý dummy dòng thứ 2 theo ngữ nghĩa của tên cột
+                col_lower = col_name.lower()
+                if "email" in col_lower:
+                    dummy_row_2[col_name] = "nguyenvana@example.com"
+                elif "điện thoại" in col_lower or "sđt" in col_lower or "phone" in col_lower:
+                    dummy_row_2[col_name] = "0912345678"
+                elif "ngày" in col_lower or "date" in col_lower or "sinh" in col_lower:
+                    dummy_row_2[col_name] = "1998-05-20"
+                else:
+                    dummy_row_2[col_name] = f"Mẫu_{col_name}"
+                    
+        if not entry_mappings:
+            raise ValueError("Không trích xuất được tham số 'entry.xxxx' nào từ URL pre-filled.")
+            
+        # Tạo file Excel mẫu
+        df_dummy = pd.DataFrame([dummy_row_1, dummy_row_2])
+        df_dummy.to_excel(output_excel, index=False, engine="openpyxl")
+        
+        # Tạo file config.json mẫu
+        config_data = {
+            "form_url": form_response_url,
+            "field_mappings": entry_mappings,
+            "success_keywords": [
+                "Your response has been recorded",
+                "Câu trả lời của bạn đã được ghi lại",
+                "Thanks for submitting your contact info!"
+            ]
+        }
+        
+        with open(output_config, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, ensure_ascii=False, indent=2)
+            
+        logger.info("=== KHỞI TẠO BOOTSTRAP THÀNH CÔNG ===")
+        logger.info(f"1. File Excel mẫu chứa {len(excel_headers)} trường: {output_excel}")
+        logger.info(f"2. File cấu hình JSON tương thích: {output_config}")
+        
+    except Exception as e:
+        logger.error(f"Quá trình khởi tạo bootstrap thất bại: {e}")
+        sys.exit(1)
+
+
+# ==============================================================================
 # MAIN ENTRYPOINT
 # ==============================================================================
 
@@ -677,10 +803,37 @@ def main() -> None:
         default="result_log.xlsx",
         help="Đường dẫn lưu kết quả báo cáo Excel."
     )
+    parser.add_argument(
+        "--init-from-url",
+        required=False,
+        default=None,
+        help="Khởi tạo tự động cấu hình và file Excel mẫu từ Link Pre-filled của Google Form."
+    )
+    parser.add_argument(
+        "--output-excel",
+        required=False,
+        default="data_template.xlsx",
+        help="Đường dẫn file Excel đầu ra khi dùng --init-from-url."
+    )
+    parser.add_argument(
+        "--output-config",
+        required=False,
+        default="config.json",
+        help="Đường dẫn file config.json đầu ra khi dùng --init-from-url."
+    )
     
     args = parser.parse_args()
     
-    # Kiểm tra sự tồn tại của file dữ liệu nguồn
+    # Nếu người dùng yêu cầu khởi tạo template từ URL pre-filled
+    if args.init_from_url:
+        bootstrap_from_prefilled_url(
+            url=args.init_from_url,
+            output_excel=args.output_excel,
+            output_config=args.output_config
+        )
+        sys.exit(0)
+        
+    # Kiểm tra sự tồn tại của file dữ liệu nguồn cho chế độ chạy chính
     if not os.path.exists(args.input):
         logger.error(f"Không tìm thấy file dữ liệu đầu vào: {args.input}")
         sys.exit(1)
