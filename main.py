@@ -108,29 +108,9 @@ class ConfigLoader:
             else:
                 config["form_id"] = form_url.split('/')[-2] if '/' in form_url else form_url
                 
-            config["mappings"] = {}
-            for entry_id, val in config["field_mappings"].items():
-                if isinstance(val, dict):
-                    # Dạng 2: mapping qua object chứa thông tin chi tiết
-                    col_name = val.get("column_name", f"Cột_{entry_id}")
-                    col_type = val.get("type", "text")
-                    if col_type.lower() == "string":
-                        col_type = "text"
-                    is_req = val.get("required", False)
-                    
-                    config["mappings"][col_name] = {
-                        "entry_id": entry_id,
-                        "type": col_type,
-                        "required": is_req
-                    }
-                else:
-                    # Dạng 1: mapping qua chuỗi tên cột trực tiếp
-                    col_name = str(val)
-                    config["mappings"][col_name] = {
-                        "entry_id": entry_id,
-                        "type": "text",
-                        "required": False
-                    }
+            # Gán trực tiếp mappings bằng field_mappings (giữ key dạng entry.xxxx)
+            config["mappings"] = config["field_mappings"]
+            
             if "success_keywords" in config:
                 if "settings" not in config:
                     config["settings"] = {}
@@ -219,10 +199,17 @@ class DataNormalizer:
         """
         payload: List[Tuple[str, str]] = []
 
-        for col_name, field_cfg in mappings.items():
-            entry_id = field_cfg["entry_id"]
-            field_type = field_cfg.get("type", "text").lower()
-            is_required = field_cfg.get("required", False)
+        for key, field_cfg in mappings.items():
+            # Tự động bóc tách entry_id và col_name để tương thích cả 2 dạng mappings (cũ và mới)
+            if key.startswith("entry."):
+                entry_id = key
+                col_name = field_cfg.get("column_name") if isinstance(field_cfg, dict) else field_cfg
+            else:
+                col_name = key
+                entry_id = field_cfg.get("entry_id") if isinstance(field_cfg, dict) else ""
+
+            is_required = field_cfg.get("required", False) if isinstance(field_cfg, dict) else False
+            field_type = field_cfg.get("type", "text").lower() if isinstance(field_cfg, dict) else "text"
 
             # Trường hợp cột cấu hình không tồn tại trong file Excel
             if col_name not in row:
@@ -400,6 +387,19 @@ class FormSubmitter:
 
         headers = self._get_headers()
         self.request_counter += 1
+
+        # Chuyển đổi payload sang dict để ghi log dễ đọc
+        payload_dict = {}
+        for k, v in payload:
+            if k in payload_dict:
+                if isinstance(payload_dict[k], list):
+                    payload_dict[k].append(v)
+                else:
+                    payload_dict[k] = [payload_dict[k], v]
+            else:
+                payload_dict[k] = v
+                
+        logger.info(f"Dòng #{line_num} - Payload gửi đi: {payload_dict}")
 
         try:
             response = self.session.post(
