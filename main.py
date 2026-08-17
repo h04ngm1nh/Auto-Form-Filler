@@ -2,13 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Google Forms Automated Form Filler (CLI Script) - Refactored Version
-Author: Senior Software Architect & Automation Specialist
+Google Forms Automated Form Filler (CLI Script) - Ponytail Refactored Version
+Author: Antigravity (under Ponytail Senior Developer guidelines)
 Description:
     Kịch bản tự động hóa gửi dữ liệu hàng loạt từ file Excel/CSV vào Google Forms
-    thông qua giao thức HTTP POST Request trực tiếp (Bypass UI/Headless).
-    Hệ thống được thiết kế với khả năng phục hồi lỗi cao (Fault-tolerant), chống chặn bot,
-    quản lý phiên nhất quán, phân tích phản hồi thông minh và cơ chế lưu vết checkpoint.
+    thông qua HTTP POST Request trực tiếp. Codebase tối giản, không boilerplate dư thừa.
 """
 
 import os
@@ -20,14 +18,10 @@ import random
 import datetime
 import argparse
 import logging
-from typing import List, Dict, Any, Tuple, Optional, Set
 import pandas as pd
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
-from tqdm import tqdm
 
-# Cấu hình lại mã hóa UTF-8 cho console Windows để tránh lỗi UnicodeEncodeError khi log tiếng Việt
+# Cấu hình lại mã hóa UTF-8 cho console Windows tránh UnicodeEncodeError
 if sys.platform.startswith("win"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -35,17 +29,15 @@ if sys.platform.startswith("win"):
     except AttributeError:
         pass
 
-# Thiết lập hệ thống Log hiển thị trên Console
+# Thiết lập log console
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("GoogleFormFiller")
 
-# Danh sách các User-Agent phổ biến của các trình duyệt máy tính hiện đại
+# Modern Desktop User-Agents
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -54,838 +46,385 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
 ]
 
+def load_config(config_path):
+    """Đọc và chuẩn hóa cấu hình config.json"""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Không tìm thấy file cấu hình: {config_path}")
 
-# ==============================================================================
-# CUSTOM EXCEPTIONS FOR DATA VALIDATION
-# ==============================================================================
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
 
-class ValidationError(Exception):
-    """Lớp ngoại lệ cơ sở cho tất cả lỗi xác thực dữ liệu tại local."""
-    pass
+    # Chuẩn hóa cấu trúc pre-filled URL sang cấu trúc chuẩn của ứng dụng
+    if "form_url" in config and "field_mappings" in config:
+        url = config["form_url"]
+        match = re.search(r'/d/e/([^/]+)/', url)
+        config["form_id"] = match.group(1) if match else (url.split('/')[-2] if '/' in url else url)
+        config["mappings"] = config["field_mappings"]
+        if "success_keywords" in config:
+            config.setdefault("settings", {})["success_keywords"] = config["success_keywords"]
 
+    if "form_id" not in config or not config["form_id"]:
+        raise ValueError("Thiếu 'form_id' trong file cấu hình.")
+    if "mappings" not in config or not config["mappings"]:
+        raise ValueError("Thiếu 'mappings' trong file cấu hình.")
 
-class MissingRequiredFieldValidationError(ValidationError):
-    """Ngoại lệ ném ra khi một trường bắt buộc bị trống trong dữ liệu nguồn."""
-    pass
+    settings = config.setdefault("settings", {})
+    defaults = {
+        "min_delay": 2.0, "max_delay": 5.0, "max_retries": 3,
+        "retry_backoff": 2.0, "timeout": 10, "session_rotation_limit": 10,
+        "success_keywords": ["Your response has been recorded", "Câu trả lời của bạn đã được ghi lại"]
+    }
+    for k, v in defaults.items():
+        settings.setdefault(k, v)
 
-
-class DateValidationError(ValidationError):
-    """Ngoại lệ ném ra khi định dạng ngày tháng trong file dữ liệu không thể parse."""
-    pass
-
-
-# ==============================================================================
-# CONFIGURATION LOADER
-# ==============================================================================
-
-class ConfigLoader:
-    """Class đảm nhận việc đọc, phân tích và xác thực cấu hình config.json."""
-
-    @staticmethod
-    def load(config_path: str) -> Dict[str, Any]:
-        """
-        Đọc file config.json và kiểm tra tính hợp lệ của các cấu hình bắt buộc.
-        
-        Args:
-            config_path (str): Đường dẫn tới file config.json.
-            
-        Returns:
-            Dict[str, Any]: Cấu hình đã được xác thực và gán giá trị mặc định.
-        """
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Không tìm thấy file cấu hình: {config_path}")
-
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-
-        # Chuyển đổi và chuẩn hóa cấu trúc config mới từ Pre-filled URL sang cấu trúc cũ nếu phát hiện
-        if "form_url" in config and "field_mappings" in config:
-            form_url = config["form_url"]
-            # Trích xuất form_id từ form_url
-            match = re.search(r'/d/e/([^/]+)/', form_url)
-            if match:
-                config["form_id"] = match.group(1)
-            else:
-                config["form_id"] = form_url.split('/')[-2] if '/' in form_url else form_url
-                
-            # Gán trực tiếp mappings bằng field_mappings (giữ key dạng entry.xxxx)
-            config["mappings"] = config["field_mappings"]
-            
-            if "success_keywords" in config:
-                if "settings" not in config:
-                    config["settings"] = {}
-                config["settings"]["success_keywords"] = config["success_keywords"]
-
-        # Xác thực các trường cấu hình cốt lõi
-        if "form_id" not in config or not config["form_id"]:
-            raise ValueError("Thiếu hoặc trống trường 'form_id' trong file cấu hình.")
-        if "mappings" not in config or not config["mappings"]:
-            raise ValueError("Thiếu hoặc trống trường 'mappings' trong file cấu hình.")
-
-        # Thiết lập các giá trị cấu hình mặc định cho settings nếu chưa khai báo
-        if "settings" not in config:
-            config["settings"] = {}
-            
-        defaults = {
-            "min_delay": 2.0,
-            "max_delay": 5.0,
-            "max_retries": 3,
-            "retry_backoff": 2.0,
-            "timeout": 10,
-            "session_rotation_limit": 10,
-            "success_keywords": [
-                "Your response has been recorded",
-                "Câu trả lời của bạn đã được ghi lại"
-            ]
-        }
-        for key, val in defaults.items():
-            config["settings"].setdefault(key, val)
-
-        # Chuẩn hóa cấu hình mappings để đảm bảo có đủ các flag mặc định
-        for col_name, field_cfg in config["mappings"].items():
+    for key, field_cfg in config["mappings"].items():
+        if isinstance(field_cfg, dict):
             field_cfg.setdefault("required", False)
             field_cfg.setdefault("type", "text")
             if field_cfg["type"].lower() == "checkbox":
                 field_cfg.setdefault("separator", ";")
+    return config
 
-        return config
+def clean_cell_value(val):
+    """Chuẩn hóa giá trị từ ô dữ liệu Excel/CSV"""
+    if pd.isna(val):
+        return ""
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    return str(val).strip()
 
+def normalize_row(row, mappings):
+    """Validate dữ liệu nguồn và chuyển đổi thành payload gửi HTTP POST"""
+    payload = []
+    for key, cfg in mappings.items():
+        if key.startswith("entry."):
+            entry_id = key
+            col_name = cfg.get("column_name") if isinstance(cfg, dict) else cfg
+        else:
+            col_name = key
+            entry_id = cfg.get("entry_id") if isinstance(cfg, dict) else ""
 
-# ==============================================================================
-# DATA NORMALIZER & LOCAL VALIDATOR
-# ==============================================================================
+        is_required = cfg.get("required", False) if isinstance(cfg, dict) else False
+        field_type = cfg.get("type", "text").lower() if isinstance(cfg, dict) else "text"
 
-class DataNormalizer:
-    """Class xử lý làm sạch, validate và chuẩn hóa dữ liệu từ nguồn trước khi gửi."""
+        if col_name not in row:
+            if is_required:
+                raise ValueError(f"Cột bắt buộc '{col_name}' không tồn tại trong dữ liệu.")
+            continue
 
-    @staticmethod
-    def clean_cell_value(val: Any) -> str:
-        """
-        Chuẩn hóa dữ liệu ô đơn lẻ, chuyển float dạng .0 về int và loại bỏ khoảng trắng.
-        
-        Args:
-            val (Any): Giá trị thô từ Pandas DataFrame.
-            
-        Returns:
-            str: Chuỗi văn bản đã được làm sạch hoặc chuỗi rỗng.
-        """
-        if pd.isna(val):
-            return ""
-        
-        # Trường hợp Pandas đọc số điện thoại hoặc mã ID thành float (ví dụ 123.0)
-        if isinstance(val, float):
-            if val.is_integer():
-                return str(int(val))
-            return str(val).strip()
-            
-        return str(val).strip()
+        val = clean_cell_value(row[col_name])
+        if not val:
+            if is_required:
+                raise ValueError(f"Trường bắt buộc '{col_name}' bị trống.")
+            continue
 
-    @classmethod
-    def normalize_row(cls, row: pd.Series, mappings: Dict[str, Any]) -> List[Tuple[str, str]]:
-        """
-        Chuyển đổi và validate một dòng dữ liệu từ Excel thành cấu trúc payload HTTP POST.
-        Kiểm tra nghiêm ngặt tính hợp lệ của trường Ngày tháng và các trường Bắt buộc.
-        
-        Args:
-            row (pd.Series): Dòng dữ liệu hiện tại trong file Excel.
-            mappings (Dict[str, Any]): Ánh xạ cột từ cấu hình config.json.
-            
-        Returns:
-            List[Tuple[str, str]]: Danh sách các tuple (key, value) biểu diễn payload URL-encoded.
-            
-        Raises:
-            MissingRequiredFieldValidationError: Nếu trường bắt buộc bị bỏ trống.
-            DateValidationError: Nếu trường ngày tháng sai định dạng không thể parse.
-        """
-        payload: List[Tuple[str, str]] = []
-
-        for key, field_cfg in mappings.items():
-            # Tự động bóc tách entry_id và col_name để tương thích cả 2 dạng mappings (cũ và mới)
-            if key.startswith("entry."):
-                entry_id = key
-                col_name = field_cfg.get("column_name") if isinstance(field_cfg, dict) else field_cfg
-            else:
-                col_name = key
-                entry_id = field_cfg.get("entry_id") if isinstance(field_cfg, dict) else ""
-
-            is_required = field_cfg.get("required", False) if isinstance(field_cfg, dict) else False
-            field_type = field_cfg.get("type", "text").lower() if isinstance(field_cfg, dict) else "text"
-
-            # Trường hợp cột cấu hình không tồn tại trong file Excel
-            if col_name not in row:
-                if is_required:
-                    raise MissingRequiredFieldValidationError(
-                        f"Cột bắt buộc '{col_name}' không tồn tại trong dữ liệu Excel."
-                    )
-                continue
-
-            raw_val = row[col_name]
-            cleaned_val = cls.clean_cell_value(raw_val)
-
-            # Kiểm tra trường bắt buộc (Required Fields) ngay tại local
-            if cleaned_val == "":
-                if is_required:
-                    raise MissingRequiredFieldValidationError(
-                        f"Trường bắt buộc '{col_name}' bị trống ở dòng này."
-                    )
-                continue
-
-            # Xử lý kiểu checkbox (chọn nhiều đáp án)
-            if field_type == "checkbox":
-                # Hỗ trợ phân tích đáp án được lưu dạng JSON list hoặc split theo dấu phân tách an toàn (mặc định ';')
-                if cleaned_val.startswith("[") and cleaned_val.endswith("]"):
-                    try:
-                        values = json.loads(cleaned_val)
-                        if not isinstance(values, list):
-                            values = [values]
-                    except json.JSONDecodeError:
-                        # Fallback về split theo separator nếu parse JSON lỗi
-                        separator = field_cfg.get("separator", ";")
-                        values = [v.strip() for v in cleaned_val.split(separator) if v.strip()]
-                else:
-                    separator = field_cfg.get("separator", ";")
-                    values = [v.strip() for v in cleaned_val.split(separator) if v.strip()]
-                
-                for val in values:
-                    payload.append((entry_id, val))
-
-            # Xử lý kiểu date (ngày tháng)
-            elif field_type == "date":
+        if field_type == "checkbox":
+            separator = cfg.get("separator", ";") if isinstance(cfg, dict) else ";"
+            if val.startswith("[") and val.endswith("]"):
                 try:
-                    # Parse nghiêm ngặt bằng pandas, ném exception nếu không nhận dạng được định dạng ngày
-                    dt = pd.to_datetime(raw_val)
-                    payload.append((f"{entry_id}_year", str(dt.year)))
-                    payload.append((f"{entry_id}_month", f"{dt.month:02d}"))
-                    payload.append((f"{entry_id}_day", f"{dt.day:02d}"))
-                except Exception as e:
-                    raise DateValidationError(
-                        f"Lỗi định dạng ngày tháng tại cột '{col_name}' với giá trị '{raw_val}'. Chi tiết: {e}"
-                    )
-
-            # Xử lý các kiểu dữ liệu văn bản/lựa chọn đơn khác (text, radio, dropdown, email, phone)
+                    vals = json.loads(val)
+                    if not isinstance(vals, list):
+                        vals = [vals]
+                except json.JSONDecodeError:
+                    vals = [v.strip() for v in val.split(separator) if v.strip()]
             else:
-                payload.append((entry_id, cleaned_val))
-
-        return payload
-
-
-# ==============================================================================
-# FORM SUBMITTER WITH SESSION ROTATION & ROBUST PARSER
-# ==============================================================================
+                vals = [v.strip() for v in val.split(separator) if v.strip()]
+            for v in vals:
+                payload.append((entry_id, v))
+        elif field_type == "date":
+            try:
+                dt = pd.to_datetime(row[col_name])
+                payload.append((f"{entry_id}_year", str(dt.year)))
+                payload.append((f"{entry_id}_month", f"{dt.month:02d}"))
+                payload.append((f"{entry_id}_day", f"{dt.day:02d}"))
+            except Exception as e:
+                raise ValueError(f"Ngày tháng '{row[col_name]}' tại cột '{col_name}' không thể parse: {e}")
+        else:
+            payload.append((entry_id, val))
+    return payload
 
 class FormSubmitter:
-    """Class quản lý kết nối HTTP, xoay vòng session ổn định và xác thực phản hồi."""
-
-    def __init__(self, form_id: str, settings: Dict[str, Any]):
+    """Quản lý HTTP session, xoay vòng User-Agent và gửi dữ liệu biểu mẫu"""
+    def __init__(self, form_id, settings):
         self.form_id = form_id
         self.settings = settings
         self.endpoint = f"https://docs.google.com/forms/d/e/{form_id}/formResponse"
-        
-        # Thư mục lưu vết HTML phản hồi khi gặp lỗi để phục vụ debug
         self.error_logs_dir = "./logs/error_responses"
-        
-        # Trạng thái quản lý phiên (Session Lifecycle)
-        self.session: Optional[requests.Session] = None
-        self.current_ua: Optional[str] = None
+        self.session = None
+        self.current_ua = None
         self.request_counter = 0
-        
-        # Khởi tạo Session đầu tiên
         self._rotate_session()
 
-    def _rotate_session(self) -> None:
-        """Đóng session cũ và thiết lập một session mới với User-Agent và bộ vân tay cố định."""
+    def _rotate_session(self):
         if self.session:
-            logger.info("Đang đóng phiên kết nối cũ để thực hiện xoay vòng Session...")
             try:
                 self.session.close()
             except Exception:
                 pass
-
         self.session = requests.Session()
         self.current_ua = random.choice(USER_AGENTS)
         self.request_counter = 0
-        
-        # Thiết lập cơ chế tự động thử lại ở tầng mạng
-        retries = Retry(
-            total=self.settings["max_retries"],
-            backoff_factor=self.settings["retry_backoff"],
-            status_forcelist=[429, 500, 502, 503, 504],
-            raise_on_status=False
-        )
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        logger.info(f"Đã thiết lập Session mới. Cố định User-Agent: {self.current_ua}")
+        logger.info(f"Đã xoay vòng Session mới. User-Agent: {self.current_ua}")
 
-    def _get_headers(self) -> Dict[str, str]:
-        """
-        Tạo bộ headers giả lập trình duyệt Chromium đồng bộ với User-Agent hiện tại.
-        
-        Returns:
-            Dict[str, str]: Bộ HTTP Headers chuẩn hóa chống chặn.
-        """
-        # Xác định nền tảng (Platform) tương ứng với User-Agent để đồng bộ Client Hint
-        ua_platform = '"Windows"'
-        if "Macintosh" in self.current_ua:
-            ua_platform = '"macOS"'
-            
+    def _get_headers(self):
         return {
             "User-Agent": self.current_ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://docs.google.com",
             "Referer": f"https://docs.google.com/forms/d/e/{self.form_id}/viewform",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "sec-ch-ua": f'"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": ua_platform
         }
 
-    def _save_error_html(self, html_content: str, line_num: int) -> str:
-        """
-        Lưu mã nguồn HTML phản hồi khi lỗi vào thư mục cục bộ để phục vụ debug.
-        
-        Args:
-            html_content (str): Nội dung HTML phản hồi từ Google.
-            line_num (int): Vị trí số dòng dữ liệu trong Excel.
-            
-        Returns:
-            str: Đường dẫn file HTML đã được lưu.
-        """
-        if not os.path.exists(self.error_logs_dir):
-            os.makedirs(self.error_logs_dir, exist_ok=True)
-            
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"form_error_{timestamp}_line_{line_num}.html"
-        filepath = os.path.join(self.error_logs_dir, filename)
-        
+    def _save_error_html(self, html, line_num):
+        os.makedirs(self.error_logs_dir, exist_ok=True)
+        filepath = os.path.join(self.error_logs_dir, f"form_error_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_line_{line_num}.html")
         with open(filepath, "w", encoding="utf-8") as f:
-            f.write(html_content)
-            
+            f.write(html)
         return filepath
 
-    def submit(self, payload: List[Tuple[str, str]], line_num: int) -> Tuple[bool, str]:
-        """
-        Thực hiện gửi POST Request lên Google Forms và xác thực phản hồi thành công kép.
-        
-        Args:
-            payload (List[Tuple[str, str]]): Payload dữ liệu đã được định dạng.
-            line_num (int): Số thứ tự dòng Excel phục vụ debug.
-            
-        Returns:
-            Tuple[bool, str]: Trạng thái (thành công/thất bại) và thông báo chi tiết.
-        """
-        # Kiểm tra giới hạn vòng xoay Session (Session Rotation Limit)
-        rotation_limit = self.settings.get("session_rotation_limit", 10)
-        if self.request_counter >= rotation_limit:
-            logger.info(f"Đạt giới hạn gửi của Session ({rotation_limit} requests). Tiến hành xoay vòng.")
+    def submit(self, payload, line_num):
+        if self.request_counter >= self.settings.get("session_rotation_limit", 10):
+            logger.info("Xoay vòng Session do vượt giới hạn requests.")
             self._rotate_session()
 
         headers = self._get_headers()
         self.request_counter += 1
+        logger.info(f"Dòng #{line_num} - Gửi payload: {dict(payload)}")
 
-        # Chuyển đổi payload sang dict để ghi log dễ đọc
-        payload_dict = {}
-        for k, v in payload:
-            if k in payload_dict:
-                if isinstance(payload_dict[k], list):
-                    payload_dict[k].append(v)
-                else:
-                    payload_dict[k] = [payload_dict[k], v]
-            else:
-                payload_dict[k] = v
-                
-        logger.info(f"Dòng #{line_num} - Payload gửi đi: {payload_dict}")
+        max_retries = self.settings.get("max_retries", 3)
+        retry_backoff = self.settings.get("retry_backoff", 2.0)
+        timeout = self.settings.get("timeout", 10)
 
-        try:
-            response = self.session.post(
-                url=self.endpoint,
-                data=payload,
-                headers=headers,
-                timeout=self.settings["timeout"]
-            )
-            
-            # Phân tích phản hồi thông minh (Robust Response Parser)
-            # Tránh lỗi False Positive khi Google Forms trả về trang biểu mẫu lỗi nhưng status_code vẫn là 200
-            html = response.text
-            
-            # Bộ từ khóa lỗi nghiệp vụ và cấu trúc lỗi DOM của Google Forms
-            error_keywords = [
-                "Mục này là bắt buộc", "This is a required question",
-                "Trường này không hợp lệ", "Invalid entry",
-                "Giá trị phải là", "Must be",
-                "Có lỗi xảy ra", "An error occurred",
-                "freebirdFormviewerViewResponseError", "hasError", "error-message"
-            ]
-            
-            # Lấy danh sách từ khóa thành công từ cấu hình hoặc fallback mặc định
-            success_keywords = self.settings.get("success_keywords", [
-                "Your response has been recorded",
-                "Câu trả lời của bạn đã được ghi lại"
-            ])
-            if not isinstance(success_keywords, list):
-                success_keywords = [str(success_keywords)]
+        for attempt in range(max_retries):
+            try:
+                response = self.session.post(self.endpoint, data=payload, headers=headers, timeout=timeout)
+                html = response.text
+                html_lower = html.lower()
 
-            # So khớp không phân biệt hoa thường để tăng độ chính xác
-            html_lower = html.lower()
-            is_recorded = any(str(k).lower() in html_lower for k in success_keywords)
-            has_error_flag = any(k in html for k in error_keywords)
+                error_keywords = ["Mục này là bắt buộc", "This is a required question", "Trường này không hợp lệ", "Invalid entry", "freebirdFormviewerViewResponseError", "hasError", "error-message"]
+                success_keywords = self.settings.get("success_keywords", ["Your response has been recorded", "Câu trả lời của bạn đã được ghi lại"])
 
-            # Điều kiện thành công kép: HTTP 200 OK + Có từ khóa thành công + Không có từ khóa lỗi
-            if response.status_code == 200:
-                if is_recorded and not has_error_flag:
-                    return True, "Gửi thành công (Phản hồi được ghi nhận)"
-                elif has_error_flag:
+                is_success = any(str(k).lower() in html_lower for k in success_keywords) or ("formResponse" in html and not any(k in html for k in error_keywords))
+                has_error = any(k in html for k in error_keywords)
+
+                if response.status_code == 200:
+                    if is_success and not has_error:
+                        return True, "Gửi thành công"
                     err_file = self._save_error_html(html, line_num)
-                    return False, f"Google Forms trả về lỗi Validation (HTML lỗi lưu tại: {err_file})"
+                    return False, f"Google Forms trả về lỗi Validation (HTML lỗi tại: {err_file})"
                 else:
-                    # Fallback kiểm tra từ khóa formResponse chung nếu Google Forms đổi mẫu cấu trúc tiếng khác
-                    if "formResponse" in html and not has_error_flag:
-                        return True, "Gửi thành công (Phân tích fallback)"
-                    
+                    if response.status_code == 429:
+                        self._rotate_session()
                     err_file = self._save_error_html(html, line_num)
-                    return False, f"Không phát hiện dấu hiệu thành công (HTML lỗi lưu tại: {err_file})"
-            else:
-                # Xoay session ngay lập tức nếu dính mã lỗi từ chối của Google (ví dụ 429) để reset IP/Session
-                if response.status_code == 429:
-                    logger.warning("Dính lỗi 429 Too Many Requests. Tiến hành đổi Session lập tức.")
+                    return False, f"Lỗi HTTP {response.status_code} (HTML lỗi tại: {err_file})"
+            except requests.RequestException as e:
+                if attempt == max_retries - 1:
                     self._rotate_session()
-                err_file = self._save_error_html(html, line_num)
-                return False, f"HTTP Error Status Code: {response.status_code} (HTML lỗi lưu tại: {err_file})"
+                    return False, f"Lỗi kết nối mạng: {e}"
+                time.sleep(retry_backoff * (attempt + 1))
 
-        except requests.exceptions.RequestException as e:
-            # Lỗi mạng vật lý, tiến hành xoay session để chuẩn bị cho request tiếp theo
-            logger.error(f"Lỗi kết nối mạng tại dòng #{line_num}: {e}. Xoay vòng Session.")
-            self._rotate_session()
-            return False, f"Lỗi kết nối mạng: {str(e)}"
-
-
-# ==============================================================================
-# EXECUTION CONTROLLER WITH CHECKPOINTING & RESUME STATE
-# ==============================================================================
-
-class ExecutionController:
-    """Class điều phối toàn bộ luồng công việc: Checkpoint, Resume, Run, Export."""
-
-    def __init__(self, data_path: str, config_path: str, output_path: str):
-        self.data_path = data_path
-        self.config_path = config_path
-        self.output_path = output_path
-        self.checkpoint_path = "checkpoint_log.csv"
-        
-        # Lưu các chỉ số dòng đã gửi thành công để bỏ qua trong chế độ Resume
-        self.success_row_indices: Set[int] = set()
-        self.is_resume_mode = False
-
-    def _load_checkpoint(self) -> None:
-        """Đọc file checkpoint và hỏi người dùng có muốn Resume từ vị trí gián đoạn không."""
-        if not os.path.exists(self.checkpoint_path):
-            return
-
-        try:
-            checkpoint_df = pd.read_csv(self.checkpoint_path)
-            if checkpoint_df.empty:
-                return
-
-            # Xác định các dòng đã gửi thành công trước đó
-            success_rows = checkpoint_df[checkpoint_df["Status"] == "Success"]
-            self.success_row_indices = set(success_rows["Row_Index"].tolist())
-
-            if not self.success_row_indices:
-                return
-
-            print(f"\n[!] CẢNH BÁO: Phát hiện file checkpoint `{self.checkpoint_path}`.")
-            print(f"    Tìm thấy {len(self.success_row_indices)} dòng dữ liệu đã được gửi thành công trước đó.")
-            choice = input("    Bạn có muốn tiếp tục (Resume) chạy tiếp từ vị trí bị gián đoạn không? [Y/n]: ").strip().lower()
-
-            if choice in ["y", "yes", ""]:
-                self.is_resume_mode = True
-                logger.info("Chế độ phục hồi lỗi (Resume) được kích hoạt.")
-            else:
-                # Xóa file checkpoint cũ nếu chọn chạy lại từ đầu
-                os.remove(self.checkpoint_path)
-                logger.info("Đã xóa file checkpoint cũ. Bắt đầu quy trình chạy mới hoàn toàn.")
-        except Exception as e:
-            logger.error(f"Không thể đọc file checkpoint: {e}. Tiến hành chạy mới hoàn toàn.")
-
-    def _append_to_checkpoint(self, row_idx: int, status: str, message: str, identifier: str) -> None:
-        """
-        Ghi append kết quả dòng hiện tại lập tức vào file checkpoint_log.csv.
-        
-        Args:
-            row_idx (int): Chỉ số dòng Excel (0-indexed).
-            status (str): Trạng thái gửi (Success/Failed).
-            message (str): Thông điệp phản hồi hoặc mô tả lỗi.
-            identifier (str): Giá trị định danh của dòng (ví dụ cột Họ tên hoặc cột đầu tiên).
-        """
-        file_exists = os.path.exists(self.checkpoint_path)
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Tạo dataframe cho bản ghi hiện tại
-        record = pd.DataFrame([{
-            "Row_Index": row_idx,
-            "Identifier": identifier,
-            "Status": status,
-            "Message": message,
-            "Timestamp": timestamp
-        }])
-
-        try:
-            # Ghi append trực tiếp
-            record.to_csv(
-                self.checkpoint_path, 
-                mode="a", 
-                header=not file_exists, 
-                index=False, 
-                encoding="utf-8"
-            )
-        except Exception as e:
-            logger.error(f"Lỗi ghi nhận checkpoint tại dòng index {row_idx}: {e}")
-
-    def _calculate_jitter_delay(self, min_delay: float, max_delay: float) -> float:
-        """
-        Tính toán khoảng trễ ngẫu nhiên phi tuyến tính bằng phân phối log-normal kết hợp.
-        Mô phỏng hành vi ngẫu nhiên có độ dài nghỉ bất thường của con người.
-        
-        Args:
-            min_delay (float): Khoảng trễ tối thiểu cấu hình.
-            max_delay (float): Khoảng trễ tối đa cấu hình.
-            
-        Returns:
-            float: Khoảng thời gian trễ tính bằng giây.
-        """
-        base_delay = random.uniform(min_delay, max_delay)
-        
-        # Thêm phân phối Log-Normal để thỉnh thoảng tạo ra đợt nghỉ dài ngẫu nhiên
-        # mu=0, sigma=0.5 tạo ra giá trị nhỏ trung bình nhưng thỉnh thoảng có giá trị lớn đột biến
-        extra_jitter = random.lognormvariate(mu=0, sigma=0.5) - 1.0
-        extra_jitter = max(0.0, extra_jitter)
-        
-        return base_delay + extra_jitter
-
-    def _export_final_report(self, df: pd.DataFrame) -> None:
-        """
-        Đối chiếu file checkpoint và xuất báo cáo Excel kết quả cuối cùng.
-        
-        Args:
-            df (pd.DataFrame): DataFrame dữ liệu gốc.
-        """
-        if not os.path.exists(self.checkpoint_path):
-            logger.error("Không tìm thấy file checkpoint để xuất báo cáo cuối cùng.")
-            return
-
-        try:
-            checkpoint_df = pd.read_csv(self.checkpoint_path)
-            
-            # Lọc bản ghi checkpoint cuối cùng của mỗi Row_Index (nếu chạy đè nhiều lần)
-            checkpoint_df = checkpoint_df.drop_duplicates(subset=["Row_Index"], keep="last")
-            
-            # Tạo map từ Row_Index sang kết quả
-            status_map = dict(zip(checkpoint_df["Row_Index"], checkpoint_df["Status"]))
-            msg_map = dict(zip(checkpoint_df["Row_Index"], checkpoint_df["Message"]))
-
-            # Gán kết quả vào DataFrame gốc
-            df["Submission_Status"] = [status_map.get(i, "Not Processed") for i in range(len(df))]
-            df["Submission_Error_Detail"] = [msg_map.get(i, "") for i in range(len(df))]
-
-            # Ghi file Excel báo cáo an toàn (tránh lỗi khóa file do người dùng đang mở)
-            write_success = False
-            current_output_path = self.output_path
-            
-            while not write_success:
-                try:
-                    df.to_excel(current_output_path, index=False, engine="openpyxl")
-                    write_success = True
-                    logger.info(f"Đã xuất báo cáo kết quả gửi dữ liệu thành công: {current_output_path}")
-                except PermissionError:
-                    print(f"\n[!] CẢNH BÁO: Không thể ghi file báo cáo vào đường dẫn: {current_output_path}")
-                    print("    Có vẻ như file Excel này đang được mở bởi một chương trình khác (ví dụ Microsoft Excel).")
-                    choice = input("    Vui lòng đóng file Excel lại và nhấn Enter để thử lại, hoặc nhập 'save' để lưu thành file phụ: ").strip().lower()
-                    if choice == "save":
-                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        base, ext = os.path.splitext(self.output_path)
-                        current_output_path = f"{base}_copy_{timestamp}{ext}"
-                except Exception as e:
-                    logger.error(f"Lỗi không xác định khi ghi báo cáo Excel: {e}")
-                    break
-            
-            # Thống kê kết quả
-            success_count = list(status_map.values()).count("Success")
-            failed_count = list(status_map.values()).count("Failed")
-            logger.info("=== BÁO CÁO THỐNG KÊ ===")
-            logger.info(f"Tổng số bản ghi xử lý: {len(status_map)}")
-            logger.info(f"Gửi thành công: {success_count}")
-            logger.info(f"Thất bại (Gồm lỗi logic dữ liệu & lỗi mạng): {failed_count}")
-            
-        except Exception as e:
-            logger.error(f"Lỗi trong quá trình tổng hợp xuất báo cáo Excel: {e}")
-
-    def run(self) -> None:
-        """Khởi chạy quy trình điều phối và gửi biểu mẫu hàng loạt."""
-        logger.info("=== BẮT ĐẦU QUY TRÌNH GỬI DỮ LIỆU TỰ ĐỘNG KHÁNG LỖI ===")
-        
-        # 1. Đọc và kiểm tra file cấu hình
-        try:
-            config = ConfigLoader.load(self.config_path)
-            logger.info("Nạp cấu hình config.json thành công.")
-        except Exception as e:
-            logger.error(f"Lỗi nạp cấu hình: {e}")
-            sys.exit(1)
-
-        # 2. Đọc file dữ liệu Excel/CSV an toàn (tránh lỗi khóa file do người dùng đang mở)
-        df = None
-        read_success = False
-        while not read_success:
-            try:
-                if self.data_path.endswith(".csv"):
-                    df = pd.read_csv(self.data_path)
-                else:
-                    df = pd.read_excel(self.data_path)
-                read_success = True
-                logger.info(f"Đọc dữ liệu thành công: {self.data_path}. Tổng số dòng: {len(df)}")
-            except PermissionError:
-                print(f"\n[!] CẢNH BÁO: Không thể đọc file dữ liệu đầu vào: {self.data_path}")
-                print("    File Excel này đang bị khóa hoặc được mở bởi một chương trình khác.")
-                input("    Vui lòng đóng file Excel lại và nhấn Enter để thử lại...")
-            except Exception as e:
-                logger.error(f"Lỗi đọc file dữ liệu đầu vào: {e}")
-                sys.exit(1)
-
-        # Kiểm tra file checkpoint và cấu hình trạng thái Resume
-        self._load_checkpoint()
-
-        # 3. Khởi tạo Submitter
-        submitter = FormSubmitter(config["form_id"], config["settings"])
-        
-        min_delay = config["settings"]["min_delay"]
-        max_delay = config["settings"]["max_delay"]
-
-        logger.info("Đang thực hiện gửi dữ liệu...")
-        
-        # Duyệt qua các dòng bằng tqdm hiển thị progress bar
-        for index, row in tqdm(df.iterrows(), total=len(df), desc="Tiến trình", unit="dòng"):
-            row_num = index + 1
-            
-            # Lấy định danh dòng (mặc định lấy cột đầu tiên để ghi log checkpoint cho dễ đọc)
-            row_identifier = str(row.iloc[0]) if len(row) > 0 else f"Row_{row_num}"
-
-            # Nếu ở chế độ Resume và dòng này đã gửi thành công trước đó thì bỏ qua
-            if self.is_resume_mode and index in self.success_row_indices:
-                continue
-
-            # Bước A: Chuẩn hóa và Validate dữ liệu tại local
-            try:
-                payload = DataNormalizer.normalize_row(row, config["mappings"])
-            except ValidationError as e:
-                # Đánh dấu lỗi logic dữ liệu và ghi nhận checkpoint ngay lập tức không gửi request rác
-                error_msg = f"Lỗi Logic Dữ Liệu Local: {str(e)}"
-                logger.warning(f"Dòng #{row_num} [{row_identifier}] bị skip: {error_msg}")
-                self._append_to_checkpoint(index, "Failed", error_msg, row_identifier)
-                continue
-            except Exception as e:
-                error_msg = f"Lỗi xử lý không xác định tại local: {str(e)}"
-                logger.error(f"Dòng #{row_num} [{row_identifier}] bị skip: {error_msg}")
-                self._append_to_checkpoint(index, "Failed", error_msg, row_identifier)
-                continue
-
-            # Bước B: Gửi dữ liệu qua HTTP POST
-            success, msg = submitter.submit(payload, row_num)
-            
-            # Ghi nhận trạng thái lập tức vào checkpoint_log.csv
-            status_str = "Success" if success else "Failed"
-            self._append_to_checkpoint(index, status_str, msg, row_identifier)
-            
-            if not success:
-                logger.warning(f"Dòng #{row_num} [{row_identifier}] gửi thất bại. Chi tiết: {msg}")
-
-            # Tạo độ trễ ngẫu nhiên Jitter phi tuyến tính tránh bị phát hiện bot
-            if index < len(df) - 1:
-                delay = self._calculate_jitter_delay(min_delay, max_delay)
-                time.sleep(delay)
-
-        # 4. Quy trình tổng hợp xuất báo cáo Excel cuối cùng từ checkpoint
-        logger.info("Đang tiến hành tổng hợp báo cáo Excel cuối cùng...")
-        self._export_final_report(df)
-        logger.info("=== QUY TRÌNH HOÀN THÀNH ===")
-
-
-# ==============================================================================
-# TEMPLATE BOOTSTRAPPER FROM PRE-FILLED URL
-# ==============================================================================
-
-def bootstrap_from_prefilled_url(url: str, output_excel: str, output_config: str) -> None:
-    """
-    Khởi tạo cấu hình config.json và file Excel mẫu từ Link Pre-filled của Google Form.
-    
-    Args:
-        url (str): Link Pre-filled Google Form.
-        output_excel (str): Đường dẫn file Excel đầu ra.
-        output_config (str): Đường dẫn file cấu hình đầu ra.
-    """
-    import urllib.parse
-    
-    logger.info("Đang bắt đầu phân tích Link Pre-filled...")
-    
+def record_checkpoint(filepath, row_idx, identifier, status, message):
+    """Ghi nhận tức thời kết quả của dòng vào file checkpoint CSV"""
+    file_exists = os.path.exists(filepath)
+    record = pd.DataFrame([{
+        "Row_Index": row_idx,
+        "Identifier": identifier,
+        "Status": status,
+        "Message": message,
+        "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }])
     try:
-        parsed_url = urllib.parse.urlparse(url)
-        path_parts = parsed_url.path.split('/')
-        form_id = None
-        
-        # Tìm form_id từ path (/d/e/[FORM_ID]/viewform)
-        try:
-            idx = path_parts.index('e')
-            form_id = path_parts[idx + 1]
-        except (ValueError, IndexError):
-            # Thử parse bằng regex nếu cấu trúc path khác
-            match = re.search(r'/d/e/([^/]+)/', parsed_url.path)
-            if match:
-                form_id = match.group(1)
-                
-        if not form_id:
-            raise ValueError("Không tìm thấy FORM ID hợp lệ trong đường dẫn URL.")
-            
-        form_response_url = f"https://docs.google.com/forms/d/e/{form_id}/formResponse"
-        
-        # Parse các tham số điền trước
-        query_params = urllib.parse.parse_qs(parsed_url.query)
-        entry_mappings = {}
-        excel_headers = []
-        dummy_row_1 = {}
-        dummy_row_2 = {}
-        
-        for key, values in query_params.items():
-            if key.startswith("entry."):
-                # Decode giá trị mẫu để làm tên cột Excel gợi ý
-                raw_val = values[0] if values else ""
-                col_name = raw_val.strip() if raw_val.strip() else f"Cột_{key}"
-                
-                # Tránh trùng lặp tên cột trong file Excel
-                original_col_name = col_name
+        record.to_csv(filepath, mode="a", header=not file_exists, index=False, encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Lỗi ghi nhận checkpoint: {e}")
+
+def bootstrap_from_prefilled_url(url, output_excel, output_config):
+    """Khởi tạo file cấu hình config.json và Excel mẫu từ link Pre-filled"""
+    import urllib.parse
+    logger.info("Đang bắt đầu phân tích Link Pre-filled...")
+    try:
+        parsed = urllib.parse.urlparse(url)
+        path_parts = parsed.path.split('/')
+        form_id = path_parts[path_parts.index('e') + 1] if 'e' in path_parts else re.search(r'/d/e/([^/]+)/', parsed.path).group(1)
+
+        query_params = urllib.parse.parse_qs(parsed.query)
+        mappings = {}
+        headers = []
+        dummy1, dummy2 = {}, {}
+
+        for k, v in query_params.items():
+            if k.startswith("entry."):
+                raw_val = v[0] if v else ""
+                col_name = raw_val.strip() if raw_val.strip() else f"Cột_{k}"
+
+                original_col = col_name
                 counter = 1
-                while col_name in excel_headers:
-                    col_name = f"{original_col_name}_{counter}"
+                while col_name in headers:
+                    col_name = f"{original_col}_{counter}"
                     counter += 1
-                    
-                entry_mappings[key] = col_name
-                excel_headers.append(col_name)
-                
-                # Tạo dữ liệu mẫu tương ứng cho cột
-                dummy_row_1[col_name] = raw_val
-                
-                # Gợi ý dummy dòng thứ 2 theo ngữ nghĩa của tên cột
+
+                mappings[k] = col_name
+                headers.append(col_name)
+                dummy1[col_name] = raw_val
+
                 col_lower = col_name.lower()
                 if "email" in col_lower:
-                    dummy_row_2[col_name] = "nguyenvana@example.com"
-                elif "điện thoại" in col_lower or "sđt" in col_lower or "phone" in col_lower:
-                    dummy_row_2[col_name] = "0912345678"
-                elif "ngày" in col_lower or "date" in col_lower or "sinh" in col_lower:
-                    dummy_row_2[col_name] = "1998-05-20"
+                    dummy2[col_name] = "nguyenvana@example.com"
+                elif any(x in col_lower for x in ["thoại", "sđt", "phone"]):
+                    dummy2[col_name] = "0912345678"
+                elif any(x in col_lower for x in ["ngày", "date", "sinh"]):
+                    dummy2[col_name] = "1998-05-20"
                 else:
-                    dummy_row_2[col_name] = f"Mẫu_{col_name}"
-                    
-        if not entry_mappings:
-            raise ValueError("Không trích xuất được tham số 'entry.xxxx' nào từ URL pre-filled.")
-            
-        # Tạo file Excel mẫu
-        df_dummy = pd.DataFrame([dummy_row_1, dummy_row_2])
-        df_dummy.to_excel(output_excel, index=False, engine="openpyxl")
-        
-        # Tạo file config.json mẫu
-        config_data = {
-            "form_url": form_response_url,
-            "field_mappings": entry_mappings,
-            "success_keywords": [
-                "Your response has been recorded",
-                "Câu trả lời của bạn đã được ghi lại",
-                "Thanks for submitting your contact info!"
-            ]
-        }
-        
+                    dummy2[col_name] = f"Mẫu_{col_name}"
+
+        if not mappings:
+            raise ValueError("Không tìm thấy tham số pre-filled 'entry.xxxx'.")
+
+        pd.DataFrame([dummy1, dummy2]).to_excel(output_excel, index=False, engine="openpyxl")
         with open(output_config, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, ensure_ascii=False, indent=2)
-            
-        logger.info("=== KHỞI TẠO BOOTSTRAP THÀNH CÔNG ===")
-        logger.info(f"1. File Excel mẫu chứa {len(excel_headers)} trường: {output_excel}")
-        logger.info(f"2. File cấu hình JSON tương thích: {output_config}")
-        
+            json.dump({"form_url": f"https://docs.google.com/forms/d/e/{form_id}/formResponse", "field_mappings": mappings}, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Khởi tạo thành công:\n1. Excel mẫu: {output_excel}\n2. Config mẫu: {output_config}")
     except Exception as e:
-        logger.error(f"Quá trình khởi tạo bootstrap thất bại: {e}")
+        logger.error(f"Bootstrap thất bại: {e}")
         sys.exit(1)
 
+def main():
+    parser = argparse.ArgumentParser(description="Google Forms Direct HTTP Auto Filler Tool - Ponytail Edition.")
+    parser.add_argument("-i", "--input", default="data/input/Data_to_input.xlsx", help="Đường dẫn file dữ liệu Excel/CSV.")
+    parser.add_argument("-c", "--config", default="config.json", help="Đường dẫn file cấu hình config.json.")
+    parser.add_argument("-o", "--output", default="data/output/result_log.xlsx", help="Đường dẫn file báo cáo Excel đầu ra.")
+    parser.add_argument("--init-from-url", default=None, help="Khởi tạo từ URL pre-filled.")
+    parser.add_argument("--output-excel", default="data_template.xlsx", help="Đường dẫn file Excel mẫu đầu ra.")
+    parser.add_argument("--output-config", default="config.json", help="Đường dẫn file config mẫu đầu ra.")
 
-# ==============================================================================
-# MAIN ENTRYPOINT
-# ==============================================================================
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Google Forms Direct HTTP Auto Filler Tool - Resilient CLI Version.",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "-i", "--input", 
-        required=False,
-        default="sample_data.xlsx",
-        help="Đường dẫn tới file Excel/CSV chứa dữ liệu."
-    )
-    parser.add_argument(
-        "-c", "--config", 
-        required=False,
-        default="config.json",
-        help="Đường dẫn tới file cấu hình config.json."
-    )
-    parser.add_argument(
-        "-o", "--output", 
-        required=False,
-        default="result_log.xlsx",
-        help="Đường dẫn lưu kết quả báo cáo Excel."
-    )
-    parser.add_argument(
-        "--init-from-url",
-        required=False,
-        default=None,
-        help="Khởi tạo tự động cấu hình và file Excel mẫu từ Link Pre-filled của Google Form."
-    )
-    parser.add_argument(
-        "--output-excel",
-        required=False,
-        default="data_template.xlsx",
-        help="Đường dẫn file Excel đầu ra khi dùng --init-from-url."
-    )
-    parser.add_argument(
-        "--output-config",
-        required=False,
-        default="config.json",
-        help="Đường dẫn file config.json đầu ra khi dùng --init-from-url."
-    )
-    
     args = parser.parse_args()
-    
-    # Nếu người dùng yêu cầu khởi tạo template từ URL pre-filled
+
     if args.init_from_url:
-        bootstrap_from_prefilled_url(
-            url=args.init_from_url,
-            output_excel=args.output_excel,
-            output_config=args.output_config
-        )
+        bootstrap_from_prefilled_url(args.init_from_url, args.output_excel, args.output_config)
         sys.exit(0)
-        
-    # Kiểm tra sự tồn tại của file dữ liệu nguồn cho chế độ chạy chính
+
     if not os.path.exists(args.input):
         logger.error(f"Không tìm thấy file dữ liệu đầu vào: {args.input}")
         sys.exit(1)
-        
-    controller = ExecutionController(
-        data_path=args.input, 
-        config_path=args.config, 
-        output_path=args.output
-    )
-    controller.run()
 
+    # 1. Nạp cấu hình
+    try:
+        config = load_config(args.config)
+        logger.info("Nạp file cấu hình config.json thành công.")
+    except Exception as e:
+        logger.error(f"Lỗi nạp cấu hình: {e}")
+        sys.exit(1)
+
+    # 2. Đọc file dữ liệu đầu vào
+    df = None
+    while df is None:
+        try:
+            df = pd.read_csv(args.input) if args.input.endswith(".csv") else pd.read_excel(args.input)
+            logger.info(f"Đọc dữ liệu thành công: {args.input}. Tổng số dòng: {len(df)}")
+        except PermissionError:
+            print(f"\n[!] CẢNH BÁO: File {args.input} đang bị khóa hoặc được mở bởi một chương trình khác.")
+            input("    Vui lòng đóng file lại và nhấn Enter để thử lại...")
+        except Exception as e:
+            logger.error(f"Lỗi đọc file dữ liệu: {e}")
+            sys.exit(1)
+
+    # 3. Phục hồi checkpoint
+    checkpoint_path = "logs/checkpoint_log.csv"
+    success_row_indices = set()
+    is_resume_mode = False
+
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint_df = pd.read_csv(checkpoint_path)
+            if not checkpoint_df.empty:
+                success_rows = checkpoint_df[checkpoint_df["Status"] == "Success"]
+                success_row_indices = set(success_rows["Row_Index"].tolist())
+
+                if success_row_indices:
+                    print(f"\n[!] CẢNH BÁO: Phát hiện checkpoint `{checkpoint_path}` với {len(success_row_indices)} dòng đã hoàn thành.")
+                    choice = input("    Bạn có muốn Resume chạy tiếp từ vị trí gián đoạn không? [Y/n]: ").strip().lower()
+                    if choice in ["y", "yes", ""]:
+                        is_resume_mode = True
+                        logger.info("Kích hoạt chế độ Resume.")
+                    else:
+                        os.remove(checkpoint_path)
+                        logger.info("Bắt đầu chạy mới hoàn toàn.")
+        except Exception as e:
+            logger.error(f"Không thể đọc checkpoint: {e}. Tiến hành chạy mới hoàn toàn.")
+
+    # 4. Gửi dữ liệu biểu mẫu
+    submitter = FormSubmitter(config["form_id"], config["settings"])
+    min_delay = config["settings"]["min_delay"]
+    max_delay = config["settings"]["max_delay"]
+
+    from tqdm import tqdm
+    for index, row in tqdm(df.iterrows(), total=len(df), desc="Tiến trình", unit="dòng"):
+        row_num = index + 1
+        row_identifier = str(row.iloc[0]) if len(row) > 0 else f"Row_{row_num}"
+
+        if is_resume_mode and index in success_row_indices:
+            continue
+
+        # A. Validate offline tại local
+        try:
+            payload = normalize_row(row, config["mappings"])
+        except Exception as e:
+            error_msg = f"Lỗi Validate Local: {e}"
+            logger.warning(f"Dòng #{row_num} [{row_identifier}] bị skip: {error_msg}")
+            record_checkpoint(checkpoint_path, index, row_identifier, "Failed", error_msg)
+            continue
+
+        # B. Gửi HTTP POST request
+        success, msg = submitter.submit(payload, row_num)
+        status_str = "Success" if success else "Failed"
+        record_checkpoint(checkpoint_path, index, row_identifier, status_str, msg)
+
+        if not success:
+            logger.warning(f"Dòng #{row_num} [{row_identifier}] gửi thất bại: {msg}")
+
+        # C. Delay Jitter phi tuyến tính
+        if index < len(df) - 1:
+            delay = random.uniform(min_delay, max_delay) + max(0.0, random.lognormvariate(0, 0.5) - 1.0)
+            time.sleep(delay)
+
+    # 5. Xuất báo cáo Excel kết quả cuối cùng từ checkpoint
+    logger.info("Đang tiến hành tổng hợp báo cáo Excel...")
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint_df = pd.read_csv(checkpoint_path).drop_duplicates(subset=["Row_Index"], keep="last")
+            status_map = dict(zip(checkpoint_df["Row_Index"], checkpoint_df["Status"]))
+            msg_map = dict(zip(checkpoint_df["Row_Index"], checkpoint_df["Message"]))
+
+            df["Submission_Status"] = [status_map.get(i, "Not Processed") for i in range(len(df))]
+            df["Submission_Error_Detail"] = [msg_map.get(i, "") for i in range(len(df))]
+
+            write_success = False
+            current_output = args.output
+            while not write_success:
+                try:
+                    df.to_excel(current_output, index=False, engine="openpyxl")
+                    write_success = True
+                    logger.info(f"Báo cáo được xuất thành công tại: {current_output}")
+                except PermissionError:
+                    print(f"\n[!] CẢNH BÁO: Không thể ghi file báo cáo vào: {current_output} (file đang mở).")
+                    choice = input("    Vui lòng đóng file Excel lại và nhấn Enter để thử lại, hoặc nhập 'save' để lưu thành file phụ: ").strip().lower()
+                    if choice == "save":
+                        base, ext = os.path.splitext(args.output)
+                        current_output = f"{base}_copy_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+                except Exception as e:
+                    logger.error(f"Lỗi khi ghi báo cáo Excel: {e}")
+                    break
+
+            success_count = list(status_map.values()).count("Success")
+            failed_count = list(status_map.values()).count("Failed")
+            logger.info("=== BÁO CÁO THỐNG KÊ ===")
+            logger.info(f"Tổng số bản ghi: {len(status_map)}")
+            logger.info(f"Thành công: {success_count}")
+            logger.info(f"Thất bại: {failed_count}")
+        except Exception as e:
+            logger.error(f"Lỗi trong quá trình tổng hợp báo cáo: {e}")
+    logger.info("=== QUY TRÌNH HOÀN THÀNH ===")
 
 if __name__ == "__main__":
     main()

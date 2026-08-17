@@ -52,6 +52,8 @@ logs/
 .env
 .env.local
 .env.*.local
+data/output/
+bootstrap_test_*
 
 # 6. Các tệp tin cấu hình Node/Vite cũ (được giữ lại để tham chiếu nếu cần, hoặc ignore)
 node_modules/
